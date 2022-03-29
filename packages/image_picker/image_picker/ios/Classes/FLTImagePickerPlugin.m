@@ -140,7 +140,7 @@ typedef NS_ENUM(NSInteger, ImagePickerClassType) { UIImagePickerClassType, PHPic
   UIImagePickerController *imagePickerController = [self createImagePickerController];
   imagePickerController.modalPresentationStyle = UIModalPresentationCurrentContext;
   imagePickerController.delegate = self;
-  imagePickerController.mediaTypes = @[ (NSString *)kUTTypeImage ];
+  imagePickerController.mediaTypes = @[ (NSString *)kUTTypeImage, (NSString *) kUTTypeMovie ];
 
   self.maxImagesAllowed = 1;
 
