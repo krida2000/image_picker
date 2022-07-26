@@ -1,6 +1,66 @@
-## NEXT
+## 0.8.9
 
+- Includes `dev_dependencies` when overridding dependencies using
+  `make-deps-path-based`.
+- Bypasses version and CHANGELOG checks for Dependabot PRs for packages
+  that are known not to be client-affecting.
+
+## 0.8.8
+
+- Allows pre-release versions in `version-check`.
+
+## 0.8.7
+
+- Supports empty custom analysis allow list files.
+- `drive-examples` now validates files to ensure that they don't accidentally
+  use `test(...)`.
+- Adds a new `dependabot-check` command to ensure complete Dependabot coverage.
+- Adds `skip-if-not-supporting-dart-version` to allow for the same use cases
+  as `skip-if-not-supporting-flutter-version` but for packages without Flutter
+  constraints.
+
+## 0.8.6
+
+- Adds `update-release-info` to apply changelog and optional version changes
+  across multiple packages.
+- Fixes changelog validation when reverting to a `NEXT` state.
+- Fixes multiplication of `--force` flag when publishing multiple packages.
+- Adds minimum deployment target flags to `xcode-analyze` to allow
+  enforcing deprecation warning handling in advance of actually dropping
+  support for an OS version.
+- Checks for template boilerplate in `readme-check`.
+- `readme-check` now validates example READMEs when present.
+
+## 0.8.5
+
+- Updates `test` to inculde the Dart unit tests of examples, if any.
+- `drive-examples` now supports non-plugin packages.
+- Commands that iterate over examples now include non-Flutter example packages.
+
+## 0.8.4
+
+- `readme-check` now validates that there's a info tag on code blocks to
+  identify (and for supported languages, syntax highlight) the language.
+- `readme-check` now has a `--require-excerpts` flag to require that any Dart
+  code blocks be managed by `code_excerpter`.
+
+## 0.8.3
+
+- Adds a new `update-excerpts` command to maintain README files using the
+  `code-excerpter` package from flutter/site-shared.
+- `license-check` now ignores submodules.
+- Allows `make-deps-path-based` to skip packages it has alredy rewritten, so
+  that running multiple times won't fail after the first time.
+- Removes UWP support, since Flutter has dropped support for UWP.
+
+## 0.8.2+1
+
+- Adds a new `readme-check` command.
 - Updates `publish-plugin` command documentation.
+- Fixes `all-plugins-app` to preserve the original application's Dart SDK
+  version to avoid changing language feature opt-ins that the template may
+  rely on.
+- Fixes `custom-test` to run `pub get` before running Dart test scripts.
 
 ## 0.8.2
 

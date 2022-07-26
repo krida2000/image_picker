@@ -9,11 +9,11 @@ import 'package:meta/meta.dart';
 import 'package:path/path.dart' as p;
 import 'package:platform/platform.dart';
 import 'package:pub_semver/pub_semver.dart';
-import 'package:pubspec_parse/pubspec_parse.dart';
 
 import 'common/core.dart';
 import 'common/git_version_finder.dart';
 import 'common/package_looping_command.dart';
+import 'common/package_state_utils.dart';
 import 'common/process_runner.dart';
 import 'common/pub_version_finder.dart';
 import 'common/repository_package.dart';
@@ -31,8 +31,8 @@ enum NextVersionType {
   /// A bugfix change.
   PATCH,
 
-  /// The release of an existing prerelease version.
-  RELEASE,
+  /// The release of an existing pre-1.0 version.
+  V1_RELEASE,
 }
 
 /// The state of a package's version relative to the comparison base.
@@ -40,8 +40,11 @@ enum _CurrentVersionState {
   /// The version is unchanged.
   unchanged,
 
-  /// The version has changed, and the transition is valid.
-  validChange,
+  /// The version has increased, and the transition is valid.
+  validIncrease,
+
+  /// The version has decrease, and the transition is a valid revert.
+  validRevert,
 
   /// The version has changed, and the transition is invalid.
   invalidChange,
@@ -50,8 +53,8 @@ enum _CurrentVersionState {
   unknown,
 }
 
-/// Returns the set of allowed next versions, with their change type, for
-/// [version].
+/// Returns the set of allowed next non-prerelease versions, with their change
+/// type, for [version].
 ///
 /// [newVersion] is used to check whether this is a pre-1.0 version bump, as
 /// those have different semver rules.
@@ -75,17 +78,17 @@ Map<Version, NextVersionType> getAllowedNextVersions(
       final int currentBuildNumber = version.build.first as int;
       nextBuildNumber = currentBuildNumber + 1;
     }
-    final Version preReleaseVersion = Version(
+    final Version nextBuildVersion = Version(
       version.major,
       version.minor,
       version.patch,
       build: nextBuildNumber.toString(),
     );
     allowedNextVersions.clear();
-    allowedNextVersions[version.nextMajor] = NextVersionType.RELEASE;
+    allowedNextVersions[version.nextMajor] = NextVersionType.V1_RELEASE;
     allowedNextVersions[version.nextMinor] = NextVersionType.BREAKING_MAJOR;
     allowedNextVersions[version.nextPatch] = NextVersionType.MINOR;
-    allowedNextVersions[preReleaseVersion] = NextVersionType.PATCH;
+    allowedNextVersions[nextBuildVersion] = NextVersionType.PATCH;
   }
   return allowedNextVersions;
 }
@@ -219,7 +222,8 @@ class VersionCheckCommand extends PackageLoopingCommand {
       case _CurrentVersionState.unchanged:
         versionChanged = false;
         break;
-      case _CurrentVersionState.validChange:
+      case _CurrentVersionState.validIncrease:
+      case _CurrentVersionState.validRevert:
         versionChanged = true;
         break;
       case _CurrentVersionState.invalidChange:
@@ -233,7 +237,7 @@ class VersionCheckCommand extends PackageLoopingCommand {
     }
 
     if (!(await _validateChangelogVersion(package,
-        pubspec: pubspec, pubspecVersionChanged: versionChanged))) {
+        pubspec: pubspec, pubspecVersionState: versionState))) {
       errors.add('CHANGELOG.md failed validation.');
     }
 
@@ -323,7 +327,7 @@ ${indentation}HTTP response: ${pubVersionFinderResponse.httpResponse.body}
           '${getBoolArg(_againstPubFlag) ? 'on pub server' : 'at git base'}.');
       logWarning(
           '${indentation}If this plugin is not new, something has gone wrong.');
-      return _CurrentVersionState.validChange; // Assume new, thus valid.
+      return _CurrentVersionState.validIncrease; // Assume new, thus valid.
     }
 
     if (previousVersion == currentVersion) {
@@ -333,22 +337,22 @@ ${indentation}HTTP response: ${pubVersionFinderResponse.httpResponse.body}
 
     // Check for reverts when doing local validation.
     if (!getBoolArg(_againstPubFlag) && currentVersion < previousVersion) {
-      final Map<Version, NextVersionType> possibleVersionsFromNewVersion =
-          getAllowedNextVersions(currentVersion, newVersion: previousVersion);
       // Since this skips validation, try to ensure that it really is likely
       // to be a revert rather than a typo by checking that the transition
       // from the lower version to the new version would have been valid.
-      if (possibleVersionsFromNewVersion.containsKey(previousVersion)) {
+      if (_shouldAllowVersionChange(
+          oldVersion: currentVersion, newVersion: previousVersion)) {
         logWarning('${indentation}New version is lower than previous version. '
             'This is assumed to be a revert.');
-        return _CurrentVersionState.validChange;
+        return _CurrentVersionState.validRevert;
       }
     }
 
     final Map<Version, NextVersionType> allowedNextVersions =
         getAllowedNextVersions(previousVersion, newVersion: currentVersion);
 
-    if (allowedNextVersions.containsKey(currentVersion)) {
+    if (_shouldAllowVersionChange(
+        oldVersion: previousVersion, newVersion: currentVersion)) {
       print('$indentation$previousVersion -> $currentVersion');
     } else {
       printError('${indentation}Incorrectly updated version.\n'
@@ -357,7 +361,13 @@ ${indentation}HTTP response: ${pubVersionFinderResponse.httpResponse.body}
       return _CurrentVersionState.invalidChange;
     }
 
-    if (allowedNextVersions[currentVersion] == NextVersionType.BREAKING_MAJOR &&
+    // Check whether the version (or for a pre-release, the version that
+    // pre-release would eventually be released as) is a breaking change, and
+    // if so, validate it.
+    final Version targetReleaseVersion =
+        currentVersion.isPreRelease ? currentVersion.nextPatch : currentVersion;
+    if (allowedNextVersions[targetReleaseVersion] ==
+            NextVersionType.BREAKING_MAJOR &&
         !_validateBreakingChange(package)) {
       printError('${indentation}Breaking change detected.\n'
           '${indentation}Breaking changes to platform interfaces are not '
@@ -368,7 +378,7 @@ ${indentation}HTTP response: ${pubVersionFinderResponse.httpResponse.body}
       return _CurrentVersionState.invalidChange;
     }
 
-    return _CurrentVersionState.validChange;
+    return _CurrentVersionState.validIncrease;
   }
 
   /// Checks whether or not [package]'s CHANGELOG's versioning is correct,
@@ -379,13 +389,13 @@ ${indentation}HTTP response: ${pubVersionFinderResponse.httpResponse.body}
   Future<bool> _validateChangelogVersion(
     RepositoryPackage package, {
     required Pubspec pubspec,
-    required bool pubspecVersionChanged,
+    required _CurrentVersionState pubspecVersionState,
   }) async {
     // This method isn't called unless `version` is non-null.
     final Version fromPubspec = pubspec.version!;
 
     // get first version from CHANGELOG
-    final File changelog = package.directory.childFile('CHANGELOG.md');
+    final File changelog = package.changelogFile;
     final List<String> lines = changelog.readAsLinesSync();
     String? firstLineWithText;
     final Iterator<String> iterator = lines.iterator;
@@ -400,14 +410,15 @@ ${indentation}HTTP response: ${pubVersionFinderResponse.httpResponse.body}
 
     final String badNextErrorMessage = '${indentation}When bumping the version '
         'for release, the NEXT section should be incorporated into the new '
-        'version\'s release notes.';
+        "version's release notes.";
 
     // Skip validation for the special NEXT version that's used to accumulate
     // changes that don't warrant publishing on their own.
     final bool hasNextSection = versionString == 'NEXT';
     if (hasNextSection) {
-      // NEXT should not be present in a commit that changes the version.
-      if (pubspecVersionChanged) {
+      // NEXT should not be present in a commit that increases the version.
+      if (pubspecVersionState == _CurrentVersionState.validIncrease ||
+          pubspecVersionState == _CurrentVersionState.invalidChange) {
         printError(badNextErrorMessage);
         return false;
       }
@@ -515,6 +526,27 @@ ${indentation}The first version listed in CHANGELOG.md is $fromChangeLog.
     return file.readAsStringSync();
   }
 
+  /// Returns true if the given version transition should be allowed.
+  bool _shouldAllowVersionChange(
+      {required Version oldVersion, required Version newVersion}) {
+    // Get the non-pre-release next version mapping.
+    final Map<Version, NextVersionType> allowedNextVersions =
+        getAllowedNextVersions(oldVersion, newVersion: newVersion);
+
+    if (allowedNextVersions.containsKey(newVersion)) {
+      return true;
+    }
+    // Allow a pre-release version of a version that would be a valid
+    // transition.
+    if (newVersion.isPreRelease) {
+      final Version targetReleaseVersion = newVersion.nextPatch;
+      if (allowedNextVersions.containsKey(targetReleaseVersion)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   /// Returns an error string if the changes to this package should have
   /// resulted in a version change, or shoud have resulted in a CHANGELOG change
   /// but didn't.
@@ -527,49 +559,25 @@ ${indentation}The first version listed in CHANGELOG.md is $fromChangeLog.
     final Directory gitRoot =
         packagesDir.fileSystem.directory((await gitDir).path);
     final String relativePackagePath =
-        getRelativePosixPath(package.directory, from: gitRoot) + '/';
-    bool hasChanges = false;
-    bool needsVersionChange = false;
-    bool hasChangelogChange = false;
-    for (final String path in _changedFiles) {
-      // Only consider files within the package.
-      if (!path.startsWith(relativePackagePath)) {
-        continue;
-      }
-      hasChanges = true;
+        getRelativePosixPath(package.directory, from: gitRoot);
 
-      final List<String> components = p.posix.split(path);
-      final bool isChangelog = components.last == 'CHANGELOG.md';
-      if (isChangelog) {
-        hasChangelogChange = true;
-      }
+    final PackageChangeState state = checkPackageChangeState(package,
+        changedPaths: _changedFiles, relativePackagePath: relativePackagePath);
 
-      if (!needsVersionChange &&
-          !isChangelog &&
-          // The example's main.dart is shown on pub.dev, but for anything else
-          // in the example publishing has no purpose.
-          !(components.contains('example') && components.last != 'main.dart') &&
-          // Changes to tests don't need to be published.
-          !components.contains('test') &&
-          !components.contains('androidTest') &&
-          !components.contains('RunnerTests') &&
-          !components.contains('RunnerUITests') &&
-          // Ignoring lints doesn't affect clients.
-          !components.contains('lint-baseline.xml')) {
-        needsVersionChange = true;
-      }
-    }
-
-    if (!hasChanges) {
+    if (!state.hasChanges) {
       return null;
     }
 
-    if (needsVersionChange) {
-      if (_getChangeDescription().split('\n').any((String line) =>
+    if (state.needsVersionChange) {
+      final String changeDescription = _getChangeDescription();
+      if (changeDescription.split('\n').any((String line) =>
           line.startsWith(_missingVersionChangeJustificationMarker))) {
         logWarning('Ignoring lack of version change due to '
             '"$_missingVersionChangeJustificationMarker" in the '
             'change description.');
+      } else if (_isAllowedDependabotChange(package, changeDescription)) {
+        logWarning('Ignoring lack of version change for Dependabot change to '
+            'a known internal dependency.');
       } else {
         printError(
             'No version change found, but the change to this package could '
@@ -582,15 +590,19 @@ ${indentation}The first version listed in CHANGELOG.md is $fromChangeLog.
       }
     }
 
-    if (!hasChangelogChange) {
-      if (_getChangeDescription().split('\n').any((String line) =>
+    if (!state.hasChangelogChange) {
+      final String changeDescription = _getChangeDescription();
+      if (changeDescription.split('\n').any((String line) =>
           line.startsWith(_missingChangelogChangeJustificationMarker))) {
         logWarning('Ignoring lack of CHANGELOG update due to '
             '"$_missingChangelogChangeJustificationMarker" in the '
             'change description.');
+      } else if (_isAllowedDependabotChange(package, changeDescription)) {
+        logWarning('Ignoring lack of CHANGELOG update for Dependabot change to '
+            'a known internal dependency.');
       } else {
         printError(
-            'No CHANGELOG change found. If this PR needs an exemption from'
+            'No CHANGELOG change found. If this PR needs an exemption from '
             'the standard policy of listing all changes in the CHANGELOG, '
             'please add a line starting with\n'
             '$_missingChangelogChangeJustificationMarker\n'
@@ -600,5 +612,53 @@ ${indentation}The first version listed in CHANGELOG.md is $fromChangeLog.
     }
 
     return null;
+  }
+
+  /// Returns true if [changeDescription] matches a Dependabot change for a
+  /// dependency roll that should bypass the normal version and CHANGELOG change
+  /// checks (for dependencies that are known not to have client impact).
+  bool _isAllowedDependabotChange(
+      RepositoryPackage package, String changeDescription) {
+    // Espresso exports some dependencies that are normally just internal test
+    // utils, so always require reviewers to check that.
+    if (package.directory.basename == 'espresso') {
+      return false;
+    }
+
+    // A string that is in all Dependabot PRs, but extremely unlikely to be in
+    // any other PR, to identify Dependabot PRs.
+    const String dependabotPRDescriptionMarker =
+        'Dependabot commands and options';
+    // The same thing, but for the Dependabot commit message, to work around
+    // https://github.com/cirruslabs/cirrus-ci-docs/issues/1029.
+    const String dependabotCommitMessageMarker =
+        'Signed-off-by: dependabot[bot]';
+    // Expression to extract the name of the dependency being updated.
+    final RegExp dependencyRegex =
+        RegExp(r'Bumps? \[(.*?)\]\(.*?\) from [\d.]+ to [\d.]+');
+
+    // Allowed exact dependency names.
+    const Set<String> allowedDependencies = <String>{
+      'junit',
+      'robolectric',
+    };
+    const Set<String> allowedDependencyPrefixes = <String>{
+      'mockito-' // mockito-core, mockito-inline, etc.
+    };
+
+    if (changeDescription.contains(dependabotPRDescriptionMarker) ||
+        changeDescription.contains(dependabotCommitMessageMarker)) {
+      final Match? match = dependencyRegex.firstMatch(changeDescription);
+      if (match != null) {
+        final String dependency = match.group(1)!;
+        if (allowedDependencies.contains(dependency) ||
+            allowedDependencyPrefixes
+                .any((String prefix) => dependency.startsWith(prefix))) {
+          return true;
+        }
+      }
+    }
+
+    return false;
   }
 }

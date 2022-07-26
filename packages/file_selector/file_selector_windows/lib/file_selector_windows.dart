@@ -2,7 +2,6 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-import 'package:cross_file/cross_file.dart';
 import 'package:file_selector_platform_interface/file_selector_platform_interface.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart';
@@ -27,6 +26,7 @@ class FileSelectorWindows extends FileSelectorPlatform {
     String? initialDirectory,
     String? confirmButtonText,
   }) async {
+    _validateTypeGroups(acceptedTypeGroups);
     final List<String>? path = await _channel.invokeListMethod<String>(
       'openFile',
       <String, dynamic>{
@@ -47,6 +47,7 @@ class FileSelectorWindows extends FileSelectorPlatform {
     String? initialDirectory,
     String? confirmButtonText,
   }) async {
+    _validateTypeGroups(acceptedTypeGroups);
     final List<String>? pathList = await _channel.invokeListMethod<String>(
       'openFile',
       <String, dynamic>{
@@ -68,6 +69,7 @@ class FileSelectorWindows extends FileSelectorPlatform {
     String? suggestedName,
     String? confirmButtonText,
   }) async {
+    _validateTypeGroups(acceptedTypeGroups);
     return _channel.invokeMethod<String>(
       'getSavePath',
       <String, dynamic>{
@@ -93,5 +95,21 @@ class FileSelectorWindows extends FileSelectorPlatform {
         'confirmButtonText': confirmButtonText,
       },
     );
+  }
+
+  /// Throws an [ArgumentError] if any of the provided type groups are not valid
+  /// for Windows.
+  void _validateTypeGroups(List<XTypeGroup>? groups) {
+    if (groups == null) {
+      return;
+    }
+    for (final XTypeGroup group in groups) {
+      if (!group.allowsAny && (group.extensions?.isEmpty ?? true)) {
+        throw ArgumentError('Provided type group $group does not allow '
+            'all files, but does not set any of the Windows-supported filter '
+            'categories. "extensions" must be non-empty for Windows if '
+            'anything is non-empty.');
+      }
+    }
   }
 }
